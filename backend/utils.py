@@ -42,6 +42,23 @@ def upload_rooms(file):
     rooms = df.dropna(how="all").to_dict(orient="records") #[{'Room No.': 'D-104' or nan, 'Row': 8.0 or nan , 'Column': 4.0 or nan}...]
     return rooms
 
+def upload_college_sem(file):
+    """Read college name and exam name from Excel file.
+    Returns (college_name, exam_name) tuple from the first non-empty record."""
+    df = pd.read_excel(file,
+                    sheet_name="main",
+                    usecols = ['College Name', 'Exam Name'])
+    info = df.dropna(how="all").to_dict(orient="records")
+    
+    if not info:
+        return "", ""
+    
+    first_record = info[0]
+    college_name = str(first_record.get("College Name", "")).strip() if first_record.get("College Name") else ""
+    exam_name = str(first_record.get("Exam Name", "")).strip() if first_record.get("Exam Name") else ""
+    
+    return college_name, exam_name
+
 def find_capacity_per_room(rooms: dict):
     room_capacity = {}
     for room in rooms:
@@ -114,8 +131,12 @@ def fill_room_row_gap(pairs: list, room_capacity: dict):
         cleaned_rows = []
         for r in range(rows):
             row_seats = [seat for seat in grid[r] if seat is not None]
+            # Include all rows (filled or empty) to show skipped alternate rows
             if row_seats:
                 cleaned_rows.append(row_seats)
+            else:
+                # Insert empty row to indicate this row was skipped
+                cleaned_rows.append([])
 
         room_layout[room_no] = cleaned_rows
 
@@ -147,8 +168,10 @@ def fill_room_col_gap(pairs: list, room_capacity: dict):
 
         cleaned_rows = []
         for r in range(rows):
-            row_seats = [seat for seat in grid[r] if seat is not None]
-            if row_seats:
+            # Include all columns (filled or empty) to show skipped alternate columns
+            row_seats = grid[r]  # Keep all columns, including None for skipped columns
+            # Only include rows that have at least one filled seat
+            if any(seat is not None for seat in row_seats):
                 cleaned_rows.append(row_seats)
 
         room_layout[room_no] = cleaned_rows
@@ -159,7 +182,7 @@ def fill_room_col_gap(pairs: list, room_capacity: dict):
     unallocated = len(pairs) - pair_idx
     return room_layout, unallocated
 
-def build_room_sheet(ws, room_name: str, rows: list):
+def build_room_sheet(ws, room_name: str, rows: list, college_name: str = "", exam_name: str = ""):
     if not rows:
         return
 
@@ -174,15 +197,44 @@ def build_room_sheet(ws, room_name: str, rows: list):
         cell.font = Font(size=font_size, bold=bold)
         cell.alignment = Alignment(horizontal="center", vertical="center")
 
-    merge_and_set(1, "Seating Plan", font_size=18)
-    merge_and_set(2, "")
-    merge_and_set(3, room_name, font_size=16)
-    merge_and_set(4, "")
-    merge_and_set(5, f"{arrow_banner}  Black Board  {arrow_banner}", font_size=11, bold=False)
+    current_row = 1
+    
+    # Display college name in big font (no blank line after)
+    if college_name:
+        merge_and_set(current_row, college_name, font_size=20, bold=True)
+        current_row += 1
+    
+    # Display exam name in big font (no blank line after)
+    if exam_name:
+        merge_and_set(current_row, exam_name, font_size=20, bold=True)
+        current_row += 1
+    
+    # Display 'Seating Plan' heading (no blank line after)
+    merge_and_set(current_row, "Seating Plan", font_size=18)
+    current_row += 1
+    
+    # Display room name (no blank line after)
+    merge_and_set(current_row, room_name, font_size=16)
+    current_row += 1
 
     thin = Side(border_style="thin", color="000000")
     border = Border(top=thin, bottom=thin, left=thin, right=thin)
-    data_start_row = 7
+    # data_start_row starts right after the room name (blackboard will be first row of table)
+    data_start_row = current_row + 1
+    
+    # Add blackboard heading as first row of the table
+    blackboard_row = data_start_row
+    ws.row_dimensions[blackboard_row].height = 36
+    ws.merge_cells(start_row=blackboard_row, start_column=1, end_row=blackboard_row, end_column=total_columns)
+    blackboard_cell = ws.cell(row=blackboard_row, column=1, value=f"{arrow_banner}  Black Board  {arrow_banner}")
+    blackboard_cell.font = Font(size=11, bold=False)
+    blackboard_cell.alignment = Alignment(horizontal="center", vertical="center")
+    # Apply border to the merged cell (apply to all cells in merged range for proper display)
+    for col in range(1, total_columns + 1):
+        ws.cell(row=blackboard_row, column=col).border = border
+    
+    # Adjust data_start_row to start after blackboard row
+    data_start_row = blackboard_row + 1
 
     for row_offset, row in enumerate(rows):
         excel_row = data_start_row + row_offset
@@ -230,7 +282,7 @@ def build_room_sheet(ws, room_name: str, rows: list):
             count_cell.alignment = Alignment(horizontal="center")
 
 
-def build_workbook(room_layout: dict, output_path: str = "seating_plan.xlsx"):
+def build_workbook(room_layout: dict, output_path: str = "seating_plan.xlsx", college_name: str = "", exam_name: str = ""):
     wb = Workbook()
     ws = wb.active
     first_sheet = True
@@ -241,7 +293,7 @@ def build_workbook(room_layout: dict, output_path: str = "seating_plan.xlsx"):
             first_sheet = False
         else:
             ws = wb.create_sheet(title=room_name)
-        build_room_sheet(ws, room_name, rows)
+        build_room_sheet(ws, room_name, rows, college_name, exam_name)
 
     wb.save(output_path)
 
@@ -250,10 +302,14 @@ if __name__ == "__main__":
     with open("C:/Users/Ankita/OneDrive/Desktop/CAE-II_JULY_2023_MS.xlsx", "rb") as f:
         pairs = upload_students(f)
         rooms = upload_rooms(f)
+        college_name, exam_name = upload_college_sem(f)
         room_capacity = find_capacity_per_room(rooms)
 
+        ## Uncomment the below functions to generate different formats
         room_layout = fill_room(pairs, room_capacity)
-        build_workbook(room_layout, "seating_plan.xlsx")
+        # room_layout, unallocated = fill_room_row_gap(pairs, room_capacity)
+        # room_layout, unallocated = fill_room_col_gap(pairs, room_capacity)
+        build_workbook(room_layout, "seating_plan.xlsx", college_name, exam_name)
 
 
 

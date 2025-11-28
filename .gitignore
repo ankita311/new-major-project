@@ -1,0 +1,7 @@
+# Python venv
+venv/
+.venv/
+env/
+
+# uv venv
+.uv/

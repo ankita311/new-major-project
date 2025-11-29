@@ -297,6 +297,22 @@ def build_workbook(room_layout: dict, output_path: str = "seating_plan.xlsx", co
 
     wb.save(output_path)
 
+def build_workbook_in_memory(room_layout: dict, college_name: str = "", exam_name: str = ""):
+    """Build workbook in memory and return the workbook object (doesn't save to disk)."""
+    wb = Workbook()
+    ws = wb.active
+    first_sheet = True
+
+    for room_name, rows in room_layout.items():
+        if first_sheet:
+            ws.title = room_name
+            first_sheet = False
+        else:
+            ws = wb.create_sheet(title=room_name)
+        build_room_sheet(ws, room_name, rows, college_name, exam_name)
+
+    return wb
+
 
 if __name__ == "__main__":
     with open("C:/Users/Ankita/OneDrive/Desktop/CAE-II_JULY_2023_MS.xlsx", "rb") as f:

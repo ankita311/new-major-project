@@ -1,5 +1,6 @@
 from collections import defaultdict
 import math
+import re
 
 import pandas as pd
 from openpyxl import Workbook
@@ -46,6 +47,61 @@ def _split_roll_and_branch(raw_value: str):
         branch = " ".join(parts[1:]) if len(parts) > 1 else ""
 
     return roll.strip(), branch.strip()
+
+def _extract_roll_number(roll_str):
+    """Extract numeric part from roll number string.
+    Handles formats like '201', '201A', '201-1', etc."""
+    if not roll_str:
+        return None
+    roll_str = str(roll_str).strip()
+    # Extract first sequence of digits
+    match = re.search(r'\d+', roll_str)
+    if match:
+        return int(match.group())
+    return None
+
+def _find_consecutive_ranges(numbers):
+    """Find consecutive number ranges from a list of roll number strings.
+    Returns a list of strings like ['201-208', '210-220']"""
+    if not numbers:
+        return []
+    
+    # Extract numeric values and filter out None
+    numeric_values = []
+    for n in numbers:
+        num = _extract_roll_number(n)
+        if num is not None:
+            numeric_values.append(num)
+    
+    if not numeric_values:
+        return []
+    
+    # Sort and find consecutive ranges
+    sorted_nums = sorted(set(numeric_values))  # Remove duplicates and sort
+    ranges = []
+    start = sorted_nums[0]
+    end = sorted_nums[0]
+    
+    for i in range(1, len(sorted_nums)):
+        if sorted_nums[i] == end + 1:
+            # Consecutive, extend range
+            end = sorted_nums[i]
+        else:
+            # Gap found, save current range
+            if start == end:
+                ranges.append(str(start))
+            else:
+                ranges.append(f"{start}-{end}")
+            start = sorted_nums[i]
+            end = sorted_nums[i]
+    
+    # Add the last range
+    if start == end:
+        ranges.append(str(start))
+    else:
+        ranges.append(f"{start}-{end}")
+    
+    return ranges
 
 def upload_students(file):
     df = pd.read_excel(file,
@@ -100,6 +156,7 @@ def fill_room(pairs: list, room_capacity: dict):
     room_layout = defaultdict(list)  # creates an empty dictionary with values as lists {some_key: []}
     branch_counts_per_room = defaultdict(lambda: defaultdict(int))  # {room_no: {branch: count}}
     pair_idx = 0
+    branch_range_per_room = defaultdict(lambda: defaultdict(list))  # {room_no: {branch: [roll_numbers]}}
 
     for room_no, spec in room_capacity.items():
         rows = int(spec.get("rows", 0) or 0)
@@ -120,12 +177,15 @@ def fill_room(pairs: list, room_capacity: dict):
                 s1_raw = pair.get("Roll No. Series-1", pair.get("s1", ""))
                 s2_raw = pair.get("Roll No. Series-2", pair.get("s2", ""))
                 
-                _, branch1 = _split_roll_and_branch(s1_raw)
-                _, branch2 = _split_roll_and_branch(s2_raw)
+                roll1, branch1 = _split_roll_and_branch(s1_raw)
+                roll2, branch2 = _split_roll_and_branch(s2_raw)
                 
-                if branch1:
+                # Track roll numbers for range calculation
+                if branch1 and roll1:
+                    branch_range_per_room[room_no][branch1].append(roll1)
                     branch_counts_per_room[room_no][branch1] += 1
-                if branch2:
+                if branch2 and roll2:
+                    branch_range_per_room[room_no][branch2].append(roll2)
                     branch_counts_per_room[room_no][branch2] += 1
                 
                 pair_idx += 1
@@ -144,11 +204,23 @@ def fill_room(pairs: list, room_capacity: dict):
         if pair_idx >= len(pairs):
             break  # no more students to allocate
     
+    # Convert roll number lists to consecutive ranges
+    branch_range_per_room_final = {}
+    for room_no, branch_rolls in branch_range_per_room.items():
+        branch_range_per_room_final[room_no] = {}
+        for branch, roll_numbers in branch_rolls.items():
+            ranges = _find_consecutive_ranges(roll_numbers)
+            if ranges:  # Only add if there are ranges
+                branch_range_per_room_final[room_no][branch] = ranges
+    
+    # Store in the original variable name for access
+    branch_range_per_room = branch_range_per_room_final
+    
     unallocated = (len(pairs) - pair_idx) * 2
     # Convert defaultdict to regular dict for return
     branch_counts_dict = {room: dict(branches) for room, branches in branch_counts_per_room.items()}
     
-    return room_layout,unallocated, branch_counts_dict      # ({'D-104': [[{pair1}, {pair2}, ...], [{pairN}, ...]]}, {'D-104': {'branch1': count, 'branch2': count}})
+    return room_layout,unallocated, branch_counts_dict, branch_range_per_room     # ({'D-104': [[{pair1}, {pair2}, ...], [{pairN}, ...]]}, {'D-104': {'branch1': count, 'branch2': count}})
 
 def build_qpd_sheet(ws, branch_counts_per_room: dict, college_name: str = "", exam_name: str = "", 
                     date: str = "", shift_time: str = "", unallocated: int = 0):
@@ -458,10 +530,239 @@ def build_qpd_sheet(ws, branch_counts_per_room: dict, college_name: str = "", ex
         ws.row_dimensions[row].height = 20
 
 
+def build_msp_base_sheet(ws, branch_range_per_room: dict):
+    """
+    Build MSP_BASE (Master Student Plan Base) sheet showing roll number ranges per room and branch.
+    
+    Args:
+        ws: openpyxl worksheet object to build the MSP_BASE sheet on
+        branch_range_per_room: Dict like {'D-104': {'IT-II': ['201-208', '210-220'], 'EE-IV': ['401-410']}, ...}
+    """
+    # Styling - use thick borders throughout
+    thick = Side(border_style="thick", color="000000")
+    border = Border(top=thick, bottom=thick, left=thick, right=thick)
+    header_border = Border(top=thick, bottom=thick, left=thick, right=thick)
+    
+    current_row = 1
+    
+    # Headers
+    headers = ["Room No.", "Branch", "Student Roll Nos."]
+    header_row = current_row
+    
+    for col_idx, header in enumerate(headers, start=1):
+        cell = ws.cell(row=header_row, column=col_idx, value=header)
+        cell.font = Font(size=11, bold=True)
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+        cell.border = header_border
+    
+    current_row += 1
+    
+    # Data rows - preserve order of rooms (not sorted)
+    for room_no in branch_range_per_room.keys():
+        branches = branch_range_per_room[room_no]
+        if not branches:
+            continue
+        
+        # Get all branches for this room (sorted for consistent display)
+        branch_list = sorted(branches.keys())
+        num_branches = len(branch_list)
+        
+        # First branch row
+        first_branch_row = current_row
+        
+        # Room No. cell (will be merged if multiple branches)
+        room_cell = ws.cell(row=first_branch_row, column=1, value=room_no)
+        room_cell.font = Font(size=10, bold=False)
+        room_cell.alignment = Alignment(horizontal="left", vertical="center")
+        room_cell.border = border
+        
+        # Process each branch in this room
+        for branch_idx, branch in enumerate(branch_list):
+            row_num = first_branch_row + branch_idx
+            
+            # Branch
+            branch_cell = ws.cell(row=row_num, column=2, value=branch)
+            branch_cell.font = Font(size=10, bold=False)
+            branch_cell.alignment = Alignment(horizontal="left", vertical="center")
+            branch_cell.border = border
+            
+            # Format roll numbers
+            ranges = branches[branch]
+            formatted_ranges = []
+            for r in ranges:
+                if '-' in r:
+                    # Range format: "201-208" -> "(201 to 208)"
+                    start, end = r.split('-', 1)
+                    formatted_ranges.append(f"({start} to {end})")
+                else:
+                    # Single number
+                    formatted_ranges.append(r)
+            
+            roll_nos_text = ", ".join(formatted_ranges)
+            roll_cell = ws.cell(row=row_num, column=3, value=roll_nos_text)
+            roll_cell.font = Font(size=10, bold=False)
+            roll_cell.alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
+            roll_cell.border = border
+            
+            # Calculate row height based on content length (reduced from before)
+            # Excel column width of 80 ≈ 80 characters (varies by font)
+            # Estimate wrapped lines: account for text length and wrapping
+            text_length = len(roll_nos_text)
+            column_width_chars = 80  # Column width in characters
+            # Account for comma+space separators (avg 2 chars per range/number)
+            # More conservative estimate to ensure all text fits
+            chars_per_line = max(60, column_width_chars - 20)  # Account for padding
+            estimated_lines = max(1, (text_length + chars_per_line - 1) // chars_per_line)
+            # Excel row height: reduced base height per line
+            base_height_per_line = 13  # Reduced further
+            calculated_height = max(18, estimated_lines * base_height_per_line + 3)  # Reduced padding
+            # Cap at reasonable maximum but allow for very long lists
+            row_height = min(calculated_height, 250)  # Reduced max further
+            ws.row_dimensions[row_num].height = row_height
+        
+        # Update current_row after processing all branches
+        current_row = first_branch_row + num_branches
+        
+        # Merge Room No. cell if multiple branches
+        if num_branches > 1:
+            ws.merge_cells(start_row=first_branch_row, start_column=1,
+                          end_row=current_row - 1, end_column=1)
+            # Reapply border to all cells in merged area
+            for r in range(first_branch_row, current_row):
+                cell = ws.cell(row=r, column=1)
+                cell.border = border
+    
+    # Set column widths
+    ws.column_dimensions[get_column_letter(1)].width = 15  # Room No.
+    ws.column_dimensions[get_column_letter(2)].width = 20   # Branch
+    ws.column_dimensions[get_column_letter(3)].width = 80  # Student Roll Nos.
+    
+    # Set header row height
+    ws.row_dimensions[header_row].height = 20
+
+
+def build_msp_sheet(ws, branch_range_per_room: dict):
+    """
+    Build MSP (Master Student Plan) sheet showing roll number ranges grouped by branch.
+    Structure: Branch -> Student Roll Nos. -> Room No.
+    
+    Args:
+        ws: openpyxl worksheet object to build the MSP sheet on
+        branch_range_per_room: Dict like {'D-104': {'IT-II': ['201-208', '210-220'], 'EE-IV': ['401-410']}, ...}
+    """
+    # Transform data structure: from {room: {branch: ranges}} to {branch: {room: ranges}}
+    # Preserve branch order and room order as they appear in the original data
+    branch_to_room_ranges = defaultdict(lambda: defaultdict(list))
+    branch_order = []
+    branch_room_order = defaultdict(list)  # Track room order for each branch
+    
+    for room_no, branches in branch_range_per_room.items():
+        for branch, ranges in branches.items():
+            if branch not in branch_order:
+                branch_order.append(branch)
+            if room_no not in branch_room_order[branch]:
+                branch_room_order[branch].append(room_no)
+            branch_to_room_ranges[branch][room_no].extend(ranges)
+    
+    # Styling - use thick borders throughout
+    thick = Side(border_style="thick", color="000000")
+    border = Border(top=thick, bottom=thick, left=thick, right=thick)
+    header_border = Border(top=thick, bottom=thick, left=thick, right=thick)
+    
+    current_row = 1
+    
+    # Headers
+    headers = ["Branch", "Student Roll Nos.", "Room No."]
+    header_row = current_row
+    
+    for col_idx, header in enumerate(headers, start=1):
+        cell = ws.cell(row=header_row, column=col_idx, value=header)
+        cell.font = Font(size=11, bold=True)
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+        cell.border = header_border
+    
+    current_row += 1
+    
+    # Data rows - grouped by branch (preserve order)
+    for branch in branch_order:
+        rooms = branch_to_room_ranges[branch]
+        room_list = branch_room_order[branch]  # Preserve room order as they first appeared
+        num_rooms = len(room_list)
+        
+        # First room row for this branch
+        first_branch_row = current_row
+        
+        # Branch cell (will be merged if multiple rooms)
+        branch_cell = ws.cell(row=first_branch_row, column=1, value=branch)
+        branch_cell.font = Font(size=10, bold=False)
+        branch_cell.alignment = Alignment(horizontal="center", vertical="center")
+        branch_cell.border = border
+        
+        # Process each room for this branch
+        for room_idx, room_no in enumerate(room_list):
+            row_num = first_branch_row + room_idx
+            
+            # Format roll numbers for this branch-room combination
+            ranges = rooms[room_no]
+            formatted_ranges = []
+            for r in ranges:
+                if '-' in r:
+                    # Range format: "201-208" -> "(201 to 208)"
+                    start, end = r.split('-', 1)
+                    formatted_ranges.append(f"({start} to {end})")
+                else:
+                    # Single number
+                    formatted_ranges.append(r)
+            
+            roll_nos_text = ", ".join(formatted_ranges)
+            roll_cell = ws.cell(row=row_num, column=2, value=roll_nos_text)
+            roll_cell.font = Font(size=10, bold=False)
+            roll_cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+            roll_cell.border = border
+            
+            # Room No.
+            room_cell = ws.cell(row=row_num, column=3, value=room_no)
+            room_cell.font = Font(size=10, bold=False)
+            room_cell.alignment = Alignment(horizontal="center", vertical="center")
+            room_cell.border = border
+            
+            # Calculate row height based on content length
+            text_length = len(roll_nos_text)
+            column_width_chars = 100  # Column width in characters for roll nos
+            chars_per_line = max(70, column_width_chars - 30)  # Account for padding
+            estimated_lines = max(1, (text_length + chars_per_line - 1) // chars_per_line)
+            # Excel row height: reduced base height per line
+            base_height_per_line = 13
+            calculated_height = max(18, estimated_lines * base_height_per_line + 3)
+            # Cap at reasonable maximum
+            row_height = min(calculated_height, 250)
+            ws.row_dimensions[row_num].height = row_height
+        
+        # Update current_row after processing all rooms for this branch
+        current_row = first_branch_row + num_rooms
+        
+        # Merge Branch cell if multiple rooms
+        if num_rooms > 1:
+            ws.merge_cells(start_row=first_branch_row, start_column=1,
+                          end_row=current_row - 1, end_column=1)
+            # Reapply border to all cells in merged area
+            for r in range(first_branch_row, current_row):
+                cell = ws.cell(row=r, column=1)
+                cell.border = border
+    
+    # Set column widths - wider for better content visibility
+    ws.column_dimensions[get_column_letter(1)].width = 30  # Branch
+    ws.column_dimensions[get_column_letter(2)].width = 120  # Student Roll Nos. (wider for long lists)
+    ws.column_dimensions[get_column_letter(3)].width = 18  # Room No.
+    
+    # Set header row height
+    ws.row_dimensions[header_row].height = 25
+
+
 def generate_qpd(branch_counts_per_room: dict, college_name: str = "", exam_name: str = "", 
                  date: str = "", shift_time: str = "", output_path: str = "qpd.xlsx", unallocated: int = 0):
     """
-    Generate a formatted QPD (Quarterly Progress Distribution) Excel file.
+    Generate a formatted QPD (Question Paper Distribution) Excel file.
     
     Args:
         branch_counts_per_room: Dict like {'D-104': {'IT-II': 32, 'MBA-IV': 32}, ...}
@@ -485,6 +786,7 @@ def fill_room_row_gap(pairs: list, room_capacity: dict):
     room_layout = defaultdict(list)
     branch_counts_per_room = defaultdict(lambda: defaultdict(int))  # {room_no: {branch: count}}
     pair_idx = 0
+    branch_range_per_room = defaultdict(lambda: defaultdict(list))  # {room_no: {branch: [roll_numbers]}}
 
     for room_no, spec in room_capacity.items():
         rows = int(spec.get("rows", 0) or 0)
@@ -504,12 +806,15 @@ def fill_room_row_gap(pairs: list, room_capacity: dict):
                 s1_raw = pair.get("Roll No. Series-1", pair.get("s1", ""))
                 s2_raw = pair.get("Roll No. Series-2", pair.get("s2", ""))
                 
-                _, branch1 = _split_roll_and_branch(s1_raw)
-                _, branch2 = _split_roll_and_branch(s2_raw)
+                roll1, branch1 = _split_roll_and_branch(s1_raw)
+                roll2, branch2 = _split_roll_and_branch(s2_raw)
                 
-                if branch1:
+                # Track roll numbers for range calculation
+                if branch1 and roll1:
+                    branch_range_per_room[room_no][branch1].append(roll1)
                     branch_counts_per_room[room_no][branch1] += 1
-                if branch2:
+                if branch2 and roll2:
+                    branch_range_per_room[room_no][branch2].append(roll2)
                     branch_counts_per_room[room_no][branch2] += 1
                 
                 pair_idx += 1
@@ -530,17 +835,30 @@ def fill_room_row_gap(pairs: list, room_capacity: dict):
 
         if pair_idx >= len(pairs):
             break
+    
+    # Convert roll number lists to consecutive ranges
+    branch_range_per_room_final = {}
+    for room_no, branch_rolls in branch_range_per_room.items():
+        branch_range_per_room_final[room_no] = {}
+        for branch, roll_numbers in branch_rolls.items():
+            ranges = _find_consecutive_ranges(roll_numbers)
+            if ranges:  # Only add if there are ranges
+                branch_range_per_room_final[room_no][branch] = ranges
+    
+    # Store in the original variable name for access
+    branch_range_per_room = branch_range_per_room_final
 
     unallocated = (len(pairs) - pair_idx) * 2
     # Convert defaultdict to regular dict for return
     branch_counts_dict = {room: dict(branches) for room, branches in branch_counts_per_room.items()}
     
-    return room_layout, unallocated, branch_counts_dict
+    return room_layout, unallocated, branch_counts_dict, branch_range_per_room
 
 def fill_room_col_gap(pairs: list, room_capacity: dict):
     room_layout = defaultdict(list)
     branch_counts_per_room = defaultdict(lambda: defaultdict(int))  # {room_no: {branch: count}}
     pair_idx = 0
+    branch_range_per_room = defaultdict(lambda: defaultdict(list))  # {room_no: {branch: [roll_numbers]}}
 
     for room_no, spec in room_capacity.items():
         rows = int(spec.get("rows", 0) or 0)
@@ -560,12 +878,15 @@ def fill_room_col_gap(pairs: list, room_capacity: dict):
                 s1_raw = pair.get("Roll No. Series-1", pair.get("s1", ""))
                 s2_raw = pair.get("Roll No. Series-2", pair.get("s2", ""))
                 
-                _, branch1 = _split_roll_and_branch(s1_raw)
-                _, branch2 = _split_roll_and_branch(s2_raw)
+                roll1, branch1 = _split_roll_and_branch(s1_raw)
+                roll2, branch2 = _split_roll_and_branch(s2_raw)
                 
-                if branch1:
+                # Track roll numbers for range calculation
+                if branch1 and roll1:
+                    branch_range_per_room[room_no][branch1].append(roll1)
                     branch_counts_per_room[room_no][branch1] += 1
-                if branch2:
+                if branch2 and roll2:
+                    branch_range_per_room[room_no][branch2].append(roll2)
                     branch_counts_per_room[room_no][branch2] += 1
                 
                 pair_idx += 1
@@ -584,12 +905,24 @@ def fill_room_col_gap(pairs: list, room_capacity: dict):
 
         if pair_idx >= len(pairs):
             break
+    
+    # Convert roll number lists to consecutive ranges
+    branch_range_per_room_final = {}
+    for room_no, branch_rolls in branch_range_per_room.items():
+        branch_range_per_room_final[room_no] = {}
+        for branch, roll_numbers in branch_rolls.items():
+            ranges = _find_consecutive_ranges(roll_numbers)
+            if ranges:  # Only add if there are ranges
+                branch_range_per_room_final[room_no][branch] = ranges
+    
+    # Store in the original variable name for access
+    branch_range_per_room = branch_range_per_room_final
 
     unallocated = (len(pairs) - pair_idx) * 2
     # Convert defaultdict to regular dict for return
     branch_counts_dict = {room: dict(branches) for room, branches in branch_counts_per_room.items()}
     
-    return room_layout, unallocated, branch_counts_dict
+    return room_layout, unallocated, branch_counts_dict, branch_range_per_room
 
 
 def build_room_sheet(ws, room_name: str, rows: list, college_name: str = "", exam_name: str = "", branch_counts: dict = None):
@@ -747,17 +1080,32 @@ def build_room_sheet(ws, room_name: str, rows: list, college_name: str = "", exa
 
 
 def build_workbook(room_layout: dict, output_path: str = "seating_plan.xlsx", college_name: str = "", exam_name: str = "", 
-                  branch_counts_per_room: dict = None, unallocated: int = 0, date: str = "", shift_time: str = ""):
+                  branch_counts_per_room: dict = None, unallocated: int = 0, date: str = "", shift_time: str = "",
+                  branch_range_per_room: dict = None):
     wb = Workbook()
     
     # Remove default sheet if we're going to create sheets
     if wb.worksheets:
         wb.remove(wb.active)
     
+    sheet_index = 0
+    
     # Create QPD sheet first if branch_counts_per_room is provided
     if branch_counts_per_room:
-        qpd_ws = wb.create_sheet(title="QPD", index=0)  # Create as first sheet
+        qpd_ws = wb.create_sheet(title="QPD", index=sheet_index)
         build_qpd_sheet(qpd_ws, branch_counts_per_room, college_name, exam_name, date, shift_time, unallocated)
+        sheet_index += 1
+    
+    # Create MSP_BASE sheet after QPD if branch_range_per_room is provided
+    if branch_range_per_room:
+        msp_base_ws = wb.create_sheet(title="MSP_BASE", index=sheet_index)
+        build_msp_base_sheet(msp_base_ws, branch_range_per_room)
+        sheet_index += 1
+        
+        # Create MSP sheet after MSP_BASE
+        msp_ws = wb.create_sheet(title="MSP", index=sheet_index)
+        build_msp_sheet(msp_ws, branch_range_per_room)
+        sheet_index += 1
     
     # Create room layout sheets
     for room_name, rows in room_layout.items():
@@ -769,7 +1117,7 @@ def build_workbook(room_layout: dict, output_path: str = "seating_plan.xlsx", co
     wb.save(output_path)
 
 def build_workbook_in_memory(room_layout: dict, college_name: str = "", exam_name: str = "", branch_counts_per_room: dict = None,
-                            unallocated: int = 0, date: str = "", shift_time: str = ""):
+                            unallocated: int = 0, date: str = "", shift_time: str = "", branch_range_per_room: dict = None):
     """Build workbook in memory and return the workbook object (doesn't save to disk)."""
     wb = Workbook()
     
@@ -777,10 +1125,24 @@ def build_workbook_in_memory(room_layout: dict, college_name: str = "", exam_nam
     if wb.worksheets:
         wb.remove(wb.active)
     
+    sheet_index = 0
+    
     # Create QPD sheet first if branch_counts_per_room is provided
     if branch_counts_per_room:
-        qpd_ws = wb.create_sheet(title="QPD", index=0)  # Create as first sheet
+        qpd_ws = wb.create_sheet(title="QPD", index=sheet_index)
         build_qpd_sheet(qpd_ws, branch_counts_per_room, college_name, exam_name, date, shift_time, unallocated)
+        sheet_index += 1
+    
+    # Create MSP_BASE sheet after QPD if branch_range_per_room is provided
+    if branch_range_per_room:
+        msp_base_ws = wb.create_sheet(title="MSP_BASE", index=sheet_index)
+        build_msp_base_sheet(msp_base_ws, branch_range_per_room)
+        sheet_index += 1
+        
+        # Create MSP sheet after MSP_BASE
+        msp_ws = wb.create_sheet(title="MSP", index=sheet_index)
+        build_msp_sheet(msp_ws, branch_range_per_room)
+        sheet_index += 1
     
     # Create room layout sheets
     for room_name, rows in room_layout.items():
@@ -802,10 +1164,11 @@ if __name__ == "__main__":
 
         ## Uncomment the below functions to generate different formats
         
-        # room_layout, unallocated, branch_counts_per_room = fill_room(pairs, room_capacity)
-        # room_layout, unallocated, branch_counts_per_room = fill_room_row_gap(pairs, room_capacity)
-        room_layout, unallocated, branch_counts_per_room = fill_room_col_gap(pairs, room_capacity)
-   
+        # room_layout, unallocated, branch_counts_per_room, branch_range_per_room = fill_room(pairs, room_capacity)
+        # room_layout, unallocated, branch_counts_per_room, branch_range_per_room = fill_room_row_gap(pairs, room_capacity)
+        room_layout, unallocated, branch_counts_per_room, branch_range_per_room = fill_room_col_gap(pairs, room_capacity)
+        # print(branch_range_per_room)
         build_workbook(room_layout, "seating_plan.xlsx", college_name, exam_name, branch_counts_per_room, 
-                      unallocated=unallocated, date="04-07-2023", shift_time="10:00-12:00")
+                      unallocated=unallocated, date="04-07-2023", shift_time="10:00-12:00", 
+                      branch_range_per_room=branch_range_per_room)
         

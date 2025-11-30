@@ -3,7 +3,7 @@ import math
 
 import pandas as pd
 from openpyxl import Workbook
-from openpyxl.styles import Alignment, Border, Font, Side
+from openpyxl.styles import Alignment, Border, Font, Side, PatternFill
 from openpyxl.utils import get_column_letter
 
 
@@ -143,14 +143,343 @@ def fill_room(pairs: list, room_capacity: dict):
 
         if pair_idx >= len(pairs):
             break  # no more students to allocate
-
+    
+    unallocated = (len(pairs) - pair_idx) * 2
     # Convert defaultdict to regular dict for return
     branch_counts_dict = {room: dict(branches) for room, branches in branch_counts_per_room.items()}
     
-    return room_layout, branch_counts_dict      # ({'D-104': [[{pair1}, {pair2}, ...], [{pairN}, ...]]}, {'D-104': {'branch1': count, 'branch2': count}})
+    return room_layout,unallocated, branch_counts_dict      # ({'D-104': [[{pair1}, {pair2}, ...], [{pairN}, ...]]}, {'D-104': {'branch1': count, 'branch2': count}})
 
-def generate_qpd(branch_counts_per_room: dict, sem: str, branch: str, subject_code: str):
-    pass
+def build_qpd_sheet(ws, branch_counts_per_room: dict, college_name: str = "", exam_name: str = "", 
+                    date: str = "", shift_time: str = "", unallocated: int = 0):
+    """
+    Build a formatted QPD (Quarterly Progress Distribution) sheet on the given worksheet.
+    
+    Args:
+        ws: openpyxl worksheet object to build the QPD sheet on
+        branch_counts_per_room: Dict like {'D-104': {'IT-II': 32, 'MBA-IV': 32}, ...}
+        college_name: Name of the college
+        exam_name: Name of the exam
+        date: Date string (e.g., "04-07-2023")
+        shift_time: Shift time (e.g., "10:00-12:00")
+        unallocated: Number of unallocated students
+    """
+    # Build the nested structure: {semester: {branch: {room: count}}}
+    qpd = defaultdict(lambda: defaultdict(dict))
+    all_rooms = []  # Preserve order from input
+    
+    for room, branch_counts in branch_counts_per_room.items():
+        if room not in all_rooms:
+            all_rooms.append(room)
+        for branch_sem, count in branch_counts.items():
+            # Split branch-semester like 'IT-II' into branch='IT' and semester='II'
+            if '-' in branch_sem:
+                branch_name, semester = branch_sem.rsplit('-', 1)
+                qpd[semester][branch_name][room] = count
+    
+    # Get all semesters and branches, sorted
+    semesters = sorted(qpd.keys())
+    all_branches_by_sem = {}
+    for sem in semesters:
+        all_branches_by_sem[sem] = sorted(qpd[sem].keys())
+    
+    # Styling - use thick borders for entire table
+    thick = Side(border_style="thick", color="000000")
+    border = Border(top=thick, bottom=thick, left=thick, right=thick)
+    header_border = Border(top=thick, bottom=thick, left=thick, right=thick)
+    yellow_fill = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
+    
+    current_row = 1
+    
+    # Determine column structure first (needed for header width calculation)
+    col = 1
+    room_col_left = col
+    col += 1
+    
+    semester_start_cols = {}
+    semester_col_ranges = {}
+    
+    for sem in semesters:
+        semester_start_cols[sem] = col
+        num_branches = len(all_branches_by_sem[sem])
+        semester_col_ranges[sem] = (col, col + num_branches - 1)
+        col += num_branches
+    
+    total_col = col
+    col += 1
+    room_col_right = col
+    table_width = room_col_right
+    
+    # Header section
+    if exam_name:
+        title = f"QPD - {exam_name}"
+        ws.merge_cells(start_row=current_row, start_column=1, 
+                      end_row=current_row, end_column=table_width)
+        cell = ws.cell(row=current_row, column=1, value=title)
+        cell.font = Font(size=16, bold=True)
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+        current_row += 1
+    
+    if date or shift_time:
+        info_text = ""
+        if date:
+            info_text = f"Date: {date}"
+        if shift_time:
+            if info_text:
+                info_text += f" | Shift: {shift_time}"
+            else:
+                info_text = f"Shift: {shift_time}"
+        
+        ws.merge_cells(start_row=current_row, start_column=1, 
+                      end_row=current_row, end_column=table_width)
+        cell = ws.cell(row=current_row, column=1, value=info_text)
+        cell.font = Font(size=12, bold=False)
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+        current_row += 2  # Extra space after header
+    
+    # Build header rows
+    header_row = current_row
+    
+    # First header row: Semester labels
+    cell = ws.cell(row=header_row, column=room_col_left, value="ROOM NO.")
+    cell.font = Font(size=11, bold=True)
+    cell.alignment = Alignment(horizontal="center", vertical="center")
+    cell.border = header_border
+    
+    for sem in semesters:
+        start_col, end_col = semester_col_ranges[sem]
+        ws.merge_cells(start_row=header_row, start_column=start_col,
+                      end_row=header_row, end_column=end_col)
+        cell = ws.cell(row=header_row, column=start_col, value=f"{sem} SEM")
+        cell.font = Font(size=11, bold=True)
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+        cell.border = header_border
+    
+    cell = ws.cell(row=header_row, column=total_col, value="Total")
+    cell.font = Font(size=11, bold=True)
+    cell.alignment = Alignment(horizontal="center", vertical="center")
+    cell.border = header_border
+    
+    cell = ws.cell(row=header_row, column=room_col_right, value="ROOM NO.")
+    cell.font = Font(size=11, bold=True)
+    cell.alignment = Alignment(horizontal="center", vertical="center")
+    cell.border = header_border
+    
+    current_row += 1
+    
+    # Second header row: Branch names
+    for sem in semesters:
+        start_col = semester_start_cols[sem]
+        for idx, branch in enumerate(all_branches_by_sem[sem]):
+            col_idx = start_col + idx
+            cell = ws.cell(row=current_row, column=col_idx, value=branch)
+            cell.font = Font(size=10, bold=True)
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+            cell.border = header_border
+    
+    # Empty cells for room columns and total in second header row
+    for col_idx in [room_col_left, total_col, room_col_right]:
+        cell = ws.cell(row=current_row, column=col_idx, value="")
+        cell.border = header_border
+    
+    current_row += 1
+    
+    # Data rows - preserve original order from input
+    for room in all_rooms:
+        row_total = 0
+        
+        # Left ROOM NO.
+        cell = ws.cell(row=current_row, column=room_col_left, value=room)
+        cell.font = Font(size=10, bold=False)
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+        cell.border = border
+        
+        # Semester columns
+        for sem in semesters:
+            start_col = semester_start_cols[sem]
+            for idx, branch in enumerate(all_branches_by_sem[sem]):
+                count = qpd[sem].get(branch, {}).get(room, 0)
+                if count > 0:
+                    row_total += count
+                
+                col_idx = start_col + idx
+                cell = ws.cell(row=current_row, column=col_idx, value=count if count > 0 else "")
+                cell.font = Font(size=10, bold=False)
+                cell.alignment = Alignment(horizontal="center", vertical="center")
+                cell.border = border
+                if count > 0:
+                    cell.fill = yellow_fill
+        
+        # Total
+        cell = ws.cell(row=current_row, column=total_col, value=row_total if row_total > 0 else "")
+        cell.font = Font(size=10, bold=False)
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+        cell.border = border
+        if row_total > 0:
+            cell.fill = yellow_fill
+        
+        # Right ROOM NO.
+        cell = ws.cell(row=current_row, column=room_col_right, value=room)
+        cell.font = Font(size=10, bold=False)
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+        cell.border = border
+        
+        current_row += 1
+    
+    # Summary row
+    summary_row = current_row
+    current_row += 1
+    
+    # Summary label
+    cell = ws.cell(row=summary_row, column=room_col_left, value="Total")
+    cell.font = Font(size=10, bold=True)
+    cell.alignment = Alignment(horizontal="center", vertical="center")
+    cell.border = header_border
+    
+    grand_total = 0
+    
+    # Semester totals
+    for sem in semesters:
+        start_col = semester_start_cols[sem]
+        for idx, branch in enumerate(all_branches_by_sem[sem]):
+            branch_total = sum(qpd[sem].get(branch, {}).values())
+            grand_total += branch_total
+            
+            col_idx = start_col + idx
+            cell = ws.cell(row=summary_row, column=col_idx, value=branch_total if branch_total > 0 else "")
+            cell.font = Font(size=10, bold=True)
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+            cell.border = header_border
+            if branch_total > 0:
+                cell.fill = yellow_fill
+    
+    # Grand total
+    cell = ws.cell(row=summary_row, column=total_col, value=grand_total)
+    cell.font = Font(size=10, bold=True)
+    cell.alignment = Alignment(horizontal="center", vertical="center")
+    cell.border = header_border
+    if grand_total > 0:
+        cell.fill = yellow_fill
+    
+    cell = ws.cell(row=summary_row, column=room_col_right, value="")
+    cell.border = header_border
+    
+    current_row += 1
+    
+    # Unallocated row
+    if unallocated > 0:
+        unallocated_row = current_row
+        current_row += 1
+        
+        # Left ROOM NO. - show "Unallocated"
+        cell = ws.cell(row=unallocated_row, column=room_col_left, value="Unallocated")
+        cell.font = Font(size=10, bold=True)
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+        cell.border = header_border
+        
+        # Empty cells for all semester/branch columns
+        for sem in semesters:
+            start_col = semester_start_cols[sem]
+            for idx, branch in enumerate(all_branches_by_sem[sem]):
+                col_idx = start_col + idx
+                cell = ws.cell(row=unallocated_row, column=col_idx, value="")
+                cell.border = header_border
+        
+        # Total column - show unallocated count
+        cell = ws.cell(row=unallocated_row, column=total_col, value=unallocated)
+        cell.font = Font(size=10, bold=True)
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+        cell.border = header_border
+        cell.fill = yellow_fill
+        
+        # Right ROOM NO. - empty
+        cell = ws.cell(row=unallocated_row, column=room_col_right, value="")
+        cell.border = header_border
+    
+    # Add header rows at the bottom (branches first, then semester labels)
+    bottom_header_row1 = current_row  # Branch names row (first at bottom)
+    current_row += 1
+    
+    # First header row at bottom: Branch names
+    for sem in semesters:
+        start_col = semester_start_cols[sem]
+        for idx, branch in enumerate(all_branches_by_sem[sem]):
+            col_idx = start_col + idx
+            cell = ws.cell(row=bottom_header_row1, column=col_idx, value=branch)
+            cell.font = Font(size=10, bold=True)
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+            cell.border = header_border
+    
+    # Empty cells for room columns and total in first header row at bottom
+    for col_idx in [room_col_left, total_col, room_col_right]:
+        cell = ws.cell(row=bottom_header_row1, column=col_idx, value="")
+        cell.border = header_border
+    
+    bottom_header_row2 = current_row  # Semester labels row (second at bottom)
+    
+    # Second header row at bottom: Semester labels and ROOM NO.
+    cell = ws.cell(row=bottom_header_row2, column=room_col_left, value="ROOM NO.")
+    cell.font = Font(size=11, bold=True)
+    cell.alignment = Alignment(horizontal="center", vertical="center")
+    cell.border = header_border
+    
+    for sem in semesters:
+        start_col, end_col = semester_col_ranges[sem]
+        ws.merge_cells(start_row=bottom_header_row2, start_column=start_col,
+                      end_row=bottom_header_row2, end_column=end_col)
+        cell = ws.cell(row=bottom_header_row2, column=start_col, value=f"{sem} SEM")
+        cell.font = Font(size=11, bold=True)
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+        cell.border = header_border
+    
+    cell = ws.cell(row=bottom_header_row2, column=total_col, value="Total")
+    cell.font = Font(size=11, bold=True)
+    cell.alignment = Alignment(horizontal="center", vertical="center")
+    cell.border = header_border
+    
+    cell = ws.cell(row=bottom_header_row2, column=room_col_right, value="ROOM NO.")
+    cell.font = Font(size=11, bold=True)
+    cell.alignment = Alignment(horizontal="center", vertical="center")
+    cell.border = header_border
+    
+    # Set column widths
+    ws.column_dimensions[get_column_letter(room_col_left)].width = 12
+    ws.column_dimensions[get_column_letter(room_col_right)].width = 12
+    ws.column_dimensions[get_column_letter(total_col)].width = 10
+    
+    for sem in semesters:
+        start_col = semester_start_cols[sem]
+        for idx, branch in enumerate(all_branches_by_sem[sem]):
+            col_idx = start_col + idx
+            ws.column_dimensions[get_column_letter(col_idx)].width = 10
+    
+    # Set row heights
+    for row in range(header_row, current_row + 1):
+        ws.row_dimensions[row].height = 20
+
+
+def generate_qpd(branch_counts_per_room: dict, college_name: str = "", exam_name: str = "", 
+                 date: str = "", shift_time: str = "", output_path: str = "qpd.xlsx", unallocated: int = 0):
+    """
+    Generate a formatted QPD (Quarterly Progress Distribution) Excel file.
+    
+    Args:
+        branch_counts_per_room: Dict like {'D-104': {'IT-II': 32, 'MBA-IV': 32}, ...}
+        college_name: Name of the college
+        exam_name: Name of the exam
+        date: Date string (e.g., "04-07-2023")
+        shift_time: Shift time (e.g., "10:00-12:00")
+        output_path: Path to save the Excel file
+        unallocated: Number of unallocated students
+    """
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "QPD"
+    
+    build_qpd_sheet(ws, branch_counts_per_room, college_name, exam_name, date, shift_time, unallocated)
+    
+    wb.save(output_path)
+
 
 def fill_room_row_gap(pairs: list, room_capacity: dict):
     room_layout = defaultdict(list)
@@ -202,7 +531,7 @@ def fill_room_row_gap(pairs: list, room_capacity: dict):
         if pair_idx >= len(pairs):
             break
 
-    unallocated = len(pairs) - pair_idx
+    unallocated = (len(pairs) - pair_idx) * 2
     # Convert defaultdict to regular dict for return
     branch_counts_dict = {room: dict(branches) for room, branches in branch_counts_per_room.items()}
     
@@ -256,91 +585,11 @@ def fill_room_col_gap(pairs: list, room_capacity: dict):
         if pair_idx >= len(pairs):
             break
 
-    unallocated = len(pairs) - pair_idx
+    unallocated = (len(pairs) - pair_idx) * 2
     # Convert defaultdict to regular dict for return
     branch_counts_dict = {room: dict(branches) for room, branches in branch_counts_per_room.items()}
     
     return room_layout, unallocated, branch_counts_dict
-
-
-# def fill_room_one_student_per_bench(pairs: list, room_capacity: dict):
-#     """
-#     Fill room with one student per bench - students from the same pair are separated by a column gap.
-#     Pattern: s1 in col 0, gap in col 1, s2 in col 2, s1 (next pair) in col 3, gap in col 4, s2 (next pair) in col 5, etc.
-#     """
-#     room_layout = defaultdict(list)
-#     branch_counts_per_room = defaultdict(lambda: defaultdict(int))  # {room_no: {branch: count}}
-#     pair_idx = 0
-
-#     for room_no, spec in room_capacity.items():
-#         rows = int(spec.get("rows", 0) or 0)
-#         cols = int(spec.get("cols", 0) or 0)
-
-#         # Build grid - need more columns to accommodate gaps (every 3rd column pattern: s1, gap, s2)
-#         # Each pair takes 3 columns: s1, gap, s2
-#         grid = [[None for _ in range(cols * 3)] for _ in range(rows)]  # Expand columns to fit gaps
-        
-#         for c in range(0, cols * 3, 3):  # Step by 3: s1 column, gap column, s2 column
-#             for r in range(rows):
-#                 if pair_idx >= len(pairs):
-#                     break
-                
-#                 pair = pairs[pair_idx]
-#                 s1_raw = pair.get("Roll No. Series-1", pair.get("s1", ""))
-#                 s2_raw = pair.get("Roll No. Series-2", pair.get("s2", ""))
-                
-#                 # Count branches
-#                 _, branch1 = _split_roll_and_branch(s1_raw)
-#                 _, branch2 = _split_roll_and_branch(s2_raw)
-                
-#                 if branch1:
-#                     branch_counts_per_room[room_no][branch1] += 1
-#                 if branch2:
-#                     branch_counts_per_room[room_no][branch2] += 1
-                
-#                 # Create single-student pairs: s1 only in first column, s2 only in third column
-#                 # Column c: s1 (with empty s2)
-#                 grid[r][c] = {
-#                     "Roll No. Series-1": s1_raw,
-#                     "Roll No. Series-2": ""
-#                 }
-                
-#                 # Column c+1: gap (None, already set)
-#                 # Column c+2: s2 (with empty s1)
-#                 grid[r][c + 2] = {
-#                     "Roll No. Series-1": "",
-#                     "Roll No. Series-2": s2_raw
-#                 }
-                
-#                 pair_idx += 1
-#             if pair_idx >= len(pairs):
-#                 break
-
-#         # Convert grid back to list-of-lists (rows)
-#         # Keep the structure with gaps (None values) to show the column separation
-#         cleaned_rows = []
-#         for r in range(rows):
-#             row_seats = []
-#             for c in range(cols * 3):
-#                 seat = grid[r][c]
-#                 if seat is not None:
-#                     row_seats.append(seat)
-#                 elif c % 3 == 1:  # This is a gap column, keep it as None to show gap
-#                     row_seats.append(None)
-#             # Only include rows that have at least one filled seat
-#             if any(seat is not None for seat in row_seats):
-#                 cleaned_rows.append(row_seats)
-
-#         room_layout[room_no] = cleaned_rows
-
-#         if pair_idx >= len(pairs):
-#             break
-    
-#     unallocated = len(pairs) - pair_idx
-#     # Convert defaultdict to regular dict for return
-#     branch_counts_dict = {room: dict(branches) for room, branches in branch_counts_per_room.items()}
-    
-#     return room_layout, unallocated, branch_counts_dict
 
 
 def build_room_sheet(ws, room_name: str, rows: list, college_name: str = "", exam_name: str = "", branch_counts: dict = None):
@@ -497,46 +746,48 @@ def build_room_sheet(ws, room_name: str, rows: list, college_name: str = "", exa
             count_cell.font = Font(size=11)
 
 
-def build_workbook(room_layout: dict, output_path: str = "seating_plan.xlsx", college_name: str = "", exam_name: str = "", branch_counts_per_room: dict = None):
+def build_workbook(room_layout: dict, output_path: str = "seating_plan.xlsx", college_name: str = "", exam_name: str = "", 
+                  branch_counts_per_room: dict = None, unallocated: int = 0, date: str = "", shift_time: str = ""):
     wb = Workbook()
-    ws = wb.active
-    first_sheet = True
-
+    
+    # Remove default sheet if we're going to create sheets
+    if wb.worksheets:
+        wb.remove(wb.active)
+    
+    # Create QPD sheet first if branch_counts_per_room is provided
+    if branch_counts_per_room:
+        qpd_ws = wb.create_sheet(title="QPD", index=0)  # Create as first sheet
+        build_qpd_sheet(qpd_ws, branch_counts_per_room, college_name, exam_name, date, shift_time, unallocated)
+    
+    # Create room layout sheets
     for room_name, rows in room_layout.items():
-        if first_sheet:
-            ws.title = room_name
-            first_sheet = False
-        else:
-            ws = wb.create_sheet(title=room_name)
-        
+        ws = wb.create_sheet(title=room_name)
         # Get branch counts for this room if provided
         branch_counts = branch_counts_per_room.get(room_name, {}) if branch_counts_per_room else {}
         build_room_sheet(ws, room_name, rows, college_name, exam_name, branch_counts)
 
     wb.save(output_path)
 
-def build_workbook_in_memory(room_layout: dict, college_name: str = "", exam_name: str = "", branch_counts_per_room: dict = None):
+def build_workbook_in_memory(room_layout: dict, college_name: str = "", exam_name: str = "", branch_counts_per_room: dict = None,
+                            unallocated: int = 0, date: str = "", shift_time: str = ""):
     """Build workbook in memory and return the workbook object (doesn't save to disk)."""
     wb = Workbook()
-    ws = wb.active
-    first_sheet = True
-
-    # Process all rooms to ensure all sheets are created
+    
+    # Remove default sheet if we're going to create sheets
+    if wb.worksheets:
+        wb.remove(wb.active)
+    
+    # Create QPD sheet first if branch_counts_per_room is provided
+    if branch_counts_per_room:
+        qpd_ws = wb.create_sheet(title="QPD", index=0)  # Create as first sheet
+        build_qpd_sheet(qpd_ws, branch_counts_per_room, college_name, exam_name, date, shift_time, unallocated)
+    
+    # Create room layout sheets
     for room_name, rows in room_layout.items():
-        if first_sheet:
-            ws.title = room_name
-            first_sheet = False
-        else:
-            ws = wb.create_sheet(title=room_name)
-        
+        ws = wb.create_sheet(title=room_name)
         # Get branch counts for this room if provided
         branch_counts = branch_counts_per_room.get(room_name, {}) if branch_counts_per_room else {}
         build_room_sheet(ws, room_name, rows, college_name, exam_name, branch_counts)
-    
-    # Ensure workbook is properly finalized
-    # Remove default empty sheet if we created other sheets
-    if len(wb.worksheets) > 1 and wb.worksheets[0].title == "Sheet":
-        wb.remove(wb.worksheets[0])
 
     return wb
 
@@ -550,10 +801,11 @@ if __name__ == "__main__":
         room_capacity = find_capacity_per_room(rooms)
 
         ## Uncomment the below functions to generate different formats
-        room_layout, branch_counts_per_room = fill_room(pairs, room_capacity)
+        
+        # room_layout, unallocated, branch_counts_per_room = fill_room(pairs, room_capacity)
         # room_layout, unallocated, branch_counts_per_room = fill_room_row_gap(pairs, room_capacity)
-        # room_layout, unallocated, branch_counts_per_room = fill_room_col_gap(pairs, room_capacity)
-        # room_layout, unallocated, branch_counts_per_room = fill_room_one_student_per_bench(pairs, room_capacity)
-        # print(branch_counts_per_room)
-        build_workbook(room_layout, "seating_plan.xlsx", college_name, exam_name, branch_counts_per_room)
-
+        room_layout, unallocated, branch_counts_per_room = fill_room_col_gap(pairs, room_capacity)
+   
+        build_workbook(room_layout, "seating_plan.xlsx", college_name, exam_name, branch_counts_per_room, 
+                      unallocated=unallocated, date="04-07-2023", shift_time="10:00-12:00")
+        

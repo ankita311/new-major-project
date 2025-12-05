@@ -1,9 +1,11 @@
 from collections import defaultdict
 import math
+import os
 import re
+from typing import Any
 
 import pandas as pd
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Border, Font, Side, PatternFill
 from openpyxl.utils import get_column_letter
 
@@ -138,7 +140,7 @@ def upload_college_sem(file):
     
     return college_name, exam_name
 
-def find_capacity_per_room(rooms: dict):
+def find_capacity_per_room(rooms: dict) -> dict[Any, Any]:
     room_capacity = {}
     for room in rooms:
         room_no = room['Room No.']
@@ -1079,96 +1081,85 @@ def build_room_sheet(ws, room_name: str, rows: list, college_name: str = "", exa
             count_cell.font = Font(size=11)
 
 
-def build_workbook(room_layout: dict, output_path: str = "seating_plan.xlsx", college_name: str = "", exam_name: str = "", 
+def build_workbook(room_layout: dict, output_path: str = "C:/Users/Ankita/OneDrive/Desktop/sample.xlsx", college_name: str = "", exam_name: str = "", 
                   branch_counts_per_room: dict = None, unallocated: int = 0, date: str = "", shift_time: str = "",
                   branch_range_per_room: dict = None):
-    wb = Workbook()
-    
-    # Remove default sheet if we're going to create sheets
-    if wb.worksheets:
-        wb.remove(wb.active)
-    
-    sheet_index = 0
-    
+    """
+    Build or update an Excel workbook with QPD/MSP and room-wise layouts.
+
+    - If `output_path` already exists, it is loaded and **kept intact**.
+      New sheets are inserted **after the 'main' sheet** in that workbook.
+    - If `output_path` does not exist, a new workbook is created.
+    """
+    # Load existing workbook if it exists, otherwise create a new one
+    if os.path.exists(output_path):
+        wb = load_workbook(output_path)
+    else:
+        wb = Workbook()
+        # Remove default sheet in a brand-new workbook
+        if wb.worksheets:
+            wb.remove(wb.active)
+
+    # Determine insertion index: right after 'main' if present, else at the end
+    sheet_names = wb.sheetnames
+    if "main" in sheet_names:
+        insert_index = sheet_names.index("main") + 1
+    else:
+        insert_index = len(wb.worksheets)
+
+    # Helper to create/replace a sheet at the current insert_index
+    def create_or_replace_sheet(title: str):
+        nonlocal insert_index
+        if title in wb.sheetnames:
+            wb.remove(wb[title])
+        ws_local = wb.create_sheet(title=title, index=insert_index)
+        insert_index += 1
+        return ws_local
+
     # Create QPD sheet first if branch_counts_per_room is provided
     if branch_counts_per_room:
-        qpd_ws = wb.create_sheet(title="QPD", index=sheet_index)
+        qpd_ws = create_or_replace_sheet("QPD")
         build_qpd_sheet(qpd_ws, branch_counts_per_room, college_name, exam_name, date, shift_time, unallocated)
-        sheet_index += 1
     
-    # Create MSP_BASE sheet after QPD if branch_range_per_room is provided
+    # Create MSP_BASE and MSP sheets if branch_range_per_room is provided
     if branch_range_per_room:
-        msp_base_ws = wb.create_sheet(title="MSP_BASE", index=sheet_index)
+        msp_base_ws = create_or_replace_sheet("MSP_BASE")
         build_msp_base_sheet(msp_base_ws, branch_range_per_room)
-        sheet_index += 1
-        
-        # Create MSP sheet after MSP_BASE
-        msp_ws = wb.create_sheet(title="MSP", index=sheet_index)
+
+        msp_ws = create_or_replace_sheet("MSP")
         build_msp_sheet(msp_ws, branch_range_per_room)
-        sheet_index += 1
     
-    # Create room layout sheets
+    # Create room layout sheets (one per room), after the analytic sheets
     for room_name, rows in room_layout.items():
-        ws = wb.create_sheet(title=room_name)
+        # Replace existing sheet with same room name, if any
+        ws = create_or_replace_sheet(room_name)
         # Get branch counts for this room if provided
         branch_counts = branch_counts_per_room.get(room_name, {}) if branch_counts_per_room else {}
         build_room_sheet(ws, room_name, rows, college_name, exam_name, branch_counts)
 
     wb.save(output_path)
 
-def build_workbook_in_memory(room_layout: dict, college_name: str = "", exam_name: str = "", branch_counts_per_room: dict = None,
-                            unallocated: int = 0, date: str = "", shift_time: str = "", branch_range_per_room: dict = None):
-    """Build workbook in memory and return the workbook object (doesn't save to disk)."""
-    wb = Workbook()
-    
-    # Remove default sheet if we're going to create sheets
-    if wb.worksheets:
-        wb.remove(wb.active)
-    
-    sheet_index = 0
-    
-    # Create QPD sheet first if branch_counts_per_room is provided
-    if branch_counts_per_room:
-        qpd_ws = wb.create_sheet(title="QPD", index=sheet_index)
-        build_qpd_sheet(qpd_ws, branch_counts_per_room, college_name, exam_name, date, shift_time, unallocated)
-        sheet_index += 1
-    
-    # Create MSP_BASE sheet after QPD if branch_range_per_room is provided
-    if branch_range_per_room:
-        msp_base_ws = wb.create_sheet(title="MSP_BASE", index=sheet_index)
-        build_msp_base_sheet(msp_base_ws, branch_range_per_room)
-        sheet_index += 1
-        
-        # Create MSP sheet after MSP_BASE
-        msp_ws = wb.create_sheet(title="MSP", index=sheet_index)
-        build_msp_sheet(msp_ws, branch_range_per_room)
-        sheet_index += 1
-    
-    # Create room layout sheets
-    for room_name, rows in room_layout.items():
-        ws = wb.create_sheet(title=room_name)
-        # Get branch counts for this room if provided
-        branch_counts = branch_counts_per_room.get(room_name, {}) if branch_counts_per_room else {}
-        build_room_sheet(ws, room_name, rows, college_name, exam_name, branch_counts)
-
-    return wb
-
+    print(f"Workbook created: {output_path}")
+    print(f"Workbook created with {len(wb.sheetnames)} sheets")
+    print(f"Sheet names: {wb.sheetnames}")
 
 
 if __name__ == "__main__":
-    with open("C:/Users/Ankita/OneDrive/Desktop/CAE-II_JULY_2023_MS.xlsx", "rb") as f:
+    ### CHANGE PATH
+    with open("C:/Users/Ankita/OneDrive/Desktop/sample.xlsx", "rb") as f:
         pairs = upload_students(f)
         rooms = upload_rooms(f)
         college_name, exam_name = upload_college_sem(f)
         room_capacity = find_capacity_per_room(rooms)
 
-        ## Uncomment the below functions to generate different formats
+        ### UNCOMMENT ANY ONE FUNCTION TO GENERATE DIFFERENT FORMATS
         
-        # room_layout, unallocated, branch_counts_per_room, branch_range_per_room = fill_room(pairs, room_capacity)
+        room_layout, unallocated, branch_counts_per_room, branch_range_per_room = fill_room(pairs, room_capacity)
         # room_layout, unallocated, branch_counts_per_room, branch_range_per_room = fill_room_row_gap(pairs, room_capacity)
-        room_layout, unallocated, branch_counts_per_room, branch_range_per_room = fill_room_col_gap(pairs, room_capacity)
-        # print(branch_range_per_room)
-        build_workbook(room_layout, "seating_plan.xlsx", college_name, exam_name, branch_counts_per_room, 
+        # room_layout, unallocated, branch_counts_per_room, branch_range_per_room = fill_room_col_gap(pairs, room_capacity)
+
+        ### CHANGE PATH
+        build_workbook(room_layout, "C:/Users/Ankita/OneDrive/Desktop/sample.xlsx", college_name, exam_name, branch_counts_per_room, 
                       unallocated=unallocated, date="04-07-2023", shift_time="10:00-12:00", 
                       branch_range_per_room=branch_range_per_room)
         
